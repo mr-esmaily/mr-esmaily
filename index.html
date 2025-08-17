@@ -4,55 +4,163 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
-  <title>PWA Hello</title>
+  <title>PWA Hello with Persistent Banners</title>
 
-  <!-- Real manifest URL (same folder) -->
   <link rel="manifest" href="manifest.webmanifest" />
-
-  <!-- iOS install hints -->
   <link rel="apple-touch-icon" href="icon-192.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
 
   <style>
+    /* page */
     html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f172a;color:#e5e7eb}
-    .container{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px}
-    button{padding:12px 18px;border:0;border-radius:12px;font-size:16px;cursor:pointer;background:#22c55e;color:#0b1215}
-    .toast{position:fixed;right:16px;bottom:16px;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;display:none}
-    .toast.show{display:flex;gap:10px;align-items:center}
-    .toast button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:6px 10px}
+    .container{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px}
+
+    /* sticky banner */
+    .pwa-banner{
+      position:sticky; top:0; z-index:9999;
+      display:none; /* shown via JS */
+      width:100%; box-sizing:border-box;
+      padding:10px 14px;
+      background:#111827; color:#fff; border-bottom:1px solid rgba(255,255,255,.12);
+      display:flex; align-items:center; gap:10px;
+    }
+    .pwa-banner--info{background:#1f2937}
+    .pwa-banner__msg{flex:1}
+    .pwa-banner__btn{
+      background:#3b82f6; color:#fff; border:0; border-radius:8px;
+      padding:8px 12px; cursor:pointer; font-size:14px;
+    }
+    .pwa-banner__btn--ghost{
+      background:transparent; border:1px solid rgba(255,255,255,.3); color:#fff;
+    }
+
+    /* demo button */
+    button.demo{padding:12px 18px;border:0;border-radius:12px;font-size:16px;cursor:pointer;background:#22c55e;color:#0b1215}
   </style>
 </head>
 <body>
+  <!-- Install banner (Android/Chrome) -->
+  <div id="installBanner" class="pwa-banner">
+    <span class="pwa-banner__msg">Install this app for a faster, app-like experience.</span>
+    <button id="installBtn" class="pwa-banner__btn">Install</button>
+    <button id="installDismiss" class="pwa-banner__btn pwa-banner__btn--ghost">Dismiss</button>
+  </div>
+
+  <!-- iOS A2HS banner (Safari) -->
+  <div id="iosBanner" class="pwa-banner pwa-banner--info">
+    <span class="pwa-banner__msg">Add to Home Screen: tap <b>Share</b> → <b>Add to Home Screen</b>.</span>
+    <button id="iosDismiss" class="pwa-banner__btn pwa-banner__btn--ghost">Dismiss</button>
+  </div>
+
+  <!-- Update banner -->
+  <div id="updateBanner" class="pwa-banner">
+    <span class="pwa-banner__msg">A new version is available.</span>
+    <button id="refreshBtn" class="pwa-banner__btn">Update now</button>
+    <button id="updateDismiss" class="pwa-banner__btn pwa-banner__btn--ghost">Dismiss</button>
+  </div>
+
   <main class="container">
     <h1>PWA Hello</h1>
-    <button id="helloBtn">Show “Hello World”</button>
-    <div id="toast" class="toast"><span>New version ready.</span><button id="refresh">Refresh</button></div>
+    <button class="demo" id="helloBtn">Show “Hello World”</button>
   </main>
 
   <script>
-    document.getElementById('helloBtn').addEventListener('click',()=>alert('Hello World bb👋'));
+    // --- Demo button ---
+    document.getElementById('helloBtn').addEventListener('click', () => alert('Hello World 👋'));
 
+    // --- Service Worker registration + update hooks ---
     if ('serviceWorker' in navigator) {
-      // Register sw in SAME folder and scope
       navigator.serviceWorker.register('./sw.js', { scope: './' });
 
-      // Auto-reload when new SW takes control
+      // If a new SW takes control, reload (after "Update now")
       navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
 
-      // Optional: periodic update checks
-      navigator.serviceWorker.ready.then(reg => setInterval(()=>reg.update(), 60*60*1000));
+      // Show update banner when a new worker is waiting
+      navigator.serviceWorker.ready.then(reg => {
+        if (reg.waiting) showUpdateBanner();
+        reg.addEventListener('updatefound', () => {
+          const sw = reg.installing;
+          sw?.addEventListener('statechange', () => {
+            if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+              showUpdateBanner();
+            }
+          });
+        });
+      });
+
+      // Listen for SW telling us it's waiting (optional extra channel)
+      navigator.serviceWorker.addEventListener('message', e => {
+        if (e.data === 'SW_WAITING') showUpdateBanner();
+      });
     }
 
-    // Simple update UI
-    navigator.serviceWorker?.addEventListener('message', e => {
-      if (e.data === 'SW_WAITING') {
-        const t = document.getElementById('toast');
-        t.classList.add('show');
-        document.getElementById('refresh').onclick = () =>
-          navigator.serviceWorker.controller?.postMessage('SKIP_WAITING');
+    // --- Persistent top banners (Install / Update / iOS) ---
+    const installBanner = document.getElementById('installBanner');
+    const updateBanner  = document.getElementById('updateBanner');
+    const iosBanner     = document.getElementById('iosBanner');
+
+    // Local storage keys so banners persist until the user dismisses
+    const LS_INSTALL_DISMISSED = 'pwa.install.dismissed';
+    const LS_UPDATE_DISMISSED  = 'pwa.update.dismissed';
+    const LS_IOS_DISMISSED     = 'pwa.ios.dismissed';
+
+    // 1) INSTALL banner (Android/Chrome) using beforeinstallprompt
+    let deferredPrompt = null;
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault(); // keep the event to show our custom UI
+      deferredPrompt = e;
+      if (!localStorage.getItem(LS_INSTALL_DISMISSED) && !isStandalone()) {
+        show(installBanner);
       }
     });
+
+    document.getElementById('installBtn').onclick = async () => {
+      if (!deferredPrompt) return;
+      deferredPrompt.prompt();
+      const choice = await deferredPrompt.userChoice;
+      // If accepted, hide; if dismissed, keep or hide – we’ll hide and let it reappear next visit unless user pressed Dismiss
+      hide(installBanner);
+      deferredPrompt = null;
+    };
+    document.getElementById('installDismiss').onclick = () => {
+      localStorage.setItem(LS_INSTALL_DISMISSED, '1');
+      hide(installBanner);
+    };
+
+    // 2) UPDATE banner
+    function showUpdateBanner() {
+      if (!localStorage.getItem(LS_UPDATE_DISMISSED)) show(updateBanner);
+    }
+    document.getElementById('refreshBtn').onclick = () => {
+      // Ask SW to activate immediately
+      navigator.serviceWorker.controller?.postMessage('SKIP_WAITING');
+      // The page will reload on 'controllerchange'
+    };
+    document.getElementById('updateDismiss').onclick = () => {
+      localStorage.setItem(LS_UPDATE_DISMISSED, '1');
+      hide(updateBanner);
+    };
+
+    // 3) iOS A2HS banner (Safari)
+    // Show only when not already installed
+    if (isIOS() && !isStandalone() && !localStorage.getItem(LS_IOS_DISMISSED)) {
+      show(iosBanner);
+    }
+    document.getElementById('iosDismiss').onclick = () => {
+      localStorage.setItem(LS_IOS_DISMISSED, '1');
+      hide(iosBanner);
+    };
+
+    // Helpers
+    function show(el){ el.style.display='flex'; }
+    function hide(el){ el.style.display='none'; }
+    function isStandalone(){
+      return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+    }
+    function isIOS(){
+      return /iphone|ipad|ipod/i.test(window.navigator.userAgent);
+    }
   </script>
 </body>
 </html>
