@@ -1,5 +1,5 @@
 // bump to deploy updates
-const VER = 'v1.0.0';
+const VER = 'v1.0.1';
 const STATIC = `static-${VER}`;
 const RUNTIME = `runtime-${VER}`;
 
@@ -59,4 +59,5 @@ self.addEventListener('install', () => notifyClients());
 async function notifyClients() {
   const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   clients.forEach(c => c.postMessage('SW_WAITING'));
+
 }
